@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""Generate SSH launchers and attach to systemd-owned Linux workspaces."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+
+BACKENDS = ('tmux', 'herdr')
+SESSION = 'ssh-workspace'
+
+
+def config_dir():
+    return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / SESSION
+
+
+def atomic_write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(text)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def machine_args(parser):
+    parser.add_argument('--name', required=True, help='label used for ssh-<name> and defaults')
+    parser.add_argument('--host', required=True, help='SSH hostname or IP address')
+    parser.add_argument('--user', required=True)
+    parser.add_argument('--key', required=True, help='local private key path (never copied)')
+    parser.add_argument('--port', type=int, default=22)
+    parser.add_argument('--tmux-wrapper', help='existing remote wrapper path relative to home')
+
+
+def validate_machine(args):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', args.name):
+        raise ValueError('name must start with a letter or digit and contain only letters, digits, _, . or -')
+    if not args.host or args.host.startswith('-') or any(c.isspace() for c in args.host):
+        raise ValueError('host must be an SSH hostname or IP address')
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', args.user):
+        raise ValueError('invalid SSH username')
+    if not 1 <= args.port <= 65535:
+        raise ValueError('port must be between 1 and 65535')
+
+
+def generate(args):
+    validate_machine(args)
+    command = [str(Path(args.launcher).expanduser().absolute()), 'connect', '--name', args.name,
+               '--host', args.host, '--user', args.user,
+               '--key', str(Path(args.key).expanduser().absolute()), '--port', str(args.port)]
+    if args.tmux_wrapper:
+        command += ['--tmux-wrapper', args.tmux_wrapper]
+    print('#!/usr/bin/env bash')
+    print('# Save as ssh-' + args.name + ' and chmod +x it.')
+    print('exec ' + shlex.join(command) + ' "$@"')
+
+
+def connect(args):
+    validate_machine(args)
+    path = config_dir() / 'defaults' / args.name
+    words = args.action
+    if words and words[0] == 'default':
+        if len(words) > 2 or (len(words) == 2 and words[1] not in (*BACKENDS, 'nothing')):
+            raise ValueError('usage: default [tmux|herdr|nothing]')
+        if len(words) == 2 and words[1] in BACKENDS:
+            atomic_write(path, words[1] + '\n')
+        print(read_default(path))
+        return 0
+    if len(words) > 1 or (words and words[0] not in BACKENDS):
+        raise ValueError('usage: [tmux|herdr] or default [tmux|herdr|nothing]')
+    backend = words[0] if words else read_default(path)
+    remote = 'exec "$HOME/.local/bin/ssh-workspace" attach ' + backend
+    if backend == 'tmux' and args.tmux_wrapper:
+        remote += ' --tmux-wrapper ' + shlex.quote(args.tmux_wrapper)
+    return subprocess.call(['ssh', '-tt', '-o', 'ConnectTimeout=10', '-i',
+                            os.path.expanduser(args.key), '-p', str(args.port),
+                            '--', args.user + '@' + args.host, remote])
+
+
+def read_default(path):
+    value = path.read_text().strip() if path.exists() else 'tmux'
+    if value not in BACKENDS:
+        raise ValueError(f'invalid default in {path}; set it with default tmux or default herdr')
+    return value
+
+
+def executable(name):
+    found = shutil.which(name)
+    local = Path.home() / '.local/bin' / name
+    if not found and local.is_file() and os.access(local, os.X_OK):
+        found = str(local)
+    if not found:
+        raise ValueError(f'{name} is missing; run ./install.sh server on this machine')
+    return found
+
+
+def run(command):
+    return subprocess.run(command, text=True, capture_output=True, timeout=15)
+
+
+def checked(command):
+    result = run(command)
+    if result.returncode:
+        raise ValueError(f'{shlex.join(command)} failed: {result.stderr.strip() or result.stdout.strip()}')
+    return result.stdout.strip()
+
+
+def remote_environment():
+    if sys.platform != 'linux':
+        raise ValueError('remote workspaces require Linux with systemd')
+    os.environ['XDG_RUNTIME_DIR'] = f'/run/user/{os.getuid()}'
+    os.environ['DBUS_SESSION_BUS_ADDRESS'] = 'unix:path=' + os.environ['XDG_RUNTIME_DIR'] + '/bus'
+    if os.environ.get('TERM', 'dumb') == 'dumb':
+        os.environ['TERM'] = 'xterm-256color'
+
+
+def backend_command(backend):
+    if backend == 'tmux':
+        return [executable('tmux'), '-N', '-L', SESSION]
+    return [executable('herdr'), '--session', SESSION]
+
+
+def ready(backend):
+    command = backend_command(backend)
+    if backend == 'tmux':
+        return run(command + ['show-options', '-s']).returncode == 0
+    result = run(command + ['status', 'server', '--json'])
+    if result.returncode:
+        return False
+    return json.loads(result.stdout).get('running', False)
+
+
+def verify_owner(unit):
+    group = checked(['systemctl', '--user', 'show', unit, '--property=ControlGroup', '--value'])
+    prefix = f'/user.slice/user-{os.getuid()}.slice/user@{os.getuid()}.service/'
+    if not group.startswith(prefix):
+        raise ValueError(f'{unit} has unexpected ControlGroup {group!r}; expected {prefix}')
+
+
+def backend_pid(backend):
+    command = backend_command(backend)
+    if backend == 'tmux':
+        return int(checked(command + ['display-message', '-p', '#{pid}']))
+    status = json.loads(checked(command + ['status', 'server', '--json']))
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+        peer.settimeout(5)
+        peer.connect(status['socket'])
+        credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i'))
+        return struct.unpack('3i', credentials)[0]
+
+
+def verify_backend_owner(backend, unit):
+    pid = backend_pid(backend)
+    groups = Path(f'/proc/{pid}/cgroup').read_text().splitlines()
+    expected = f'/user.slice/user-{os.getuid()}.slice/user@{os.getuid()}.service/'
+    if not any(line.split(':', 2)[-1].startswith(expected)
+               and line.split(':', 2)[-1].endswith('/' + unit) for line in groups):
+        raise ValueError(f'{backend} server PID {pid} does not belong to {unit}; refusing to attach')
+
+
+def attach(args):
+    remote_environment()
+    if args.tmux_wrapper:
+        if args.backend != 'tmux':
+            raise ValueError('--tmux-wrapper is only valid for tmux')
+        wrapper = Path(args.tmux_wrapper).expanduser()
+        if not wrapper.is_absolute():
+            wrapper = Path.home() / wrapper
+        if args.check:
+            # Existing wrappers own their own readiness/ownership contract.
+            raise ValueError('--check is unavailable with an existing tmux wrapper')
+        os.execv(str(wrapper), [str(wrapper)])
+    unit = f'ssh-workspace-{args.backend}.service'
+    checked(['systemctl', '--user', 'show-environment'])
+    active = run(['systemctl', '--user', 'is-active', '--quiet', unit]).returncode == 0
+    if not active:
+        if ready(args.backend):
+            raise ValueError(f'{args.backend} session {SESSION} already exists outside {unit}; inspect it before installing another owner')
+        checked(['systemctl', '--user', 'start', unit])
+    for _ in range(30):
+        if run(['systemctl', '--user', 'is-active', '--quiet', unit]).returncode != 0:
+            raise ValueError(f'{unit} is not active; inspect journalctl --user -u {unit}')
+        if ready(args.backend):
+            verify_owner(unit)
+            verify_backend_owner(args.backend, unit)
+            if args.check:
+                print(f'{args.backend}: ready ({unit})')
+                return 0
+            command = backend_command(args.backend)
+            if args.backend == 'tmux':
+                command += ['new-session', '-A', '-s', 'workspace']
+            else:
+                # Herdr client attaches only; unlike bare herdr it never spawns a server.
+                command += ['client']
+            os.execv(command[0], command)
+        time.sleep(0.2)
+    raise ValueError(f'{unit} did not become ready; inspect journalctl --user -u {unit}; no restart performed')
+
+
+def server(args):
+    remote_environment()
+    # This entrypoint must be invoked by its systemd service, never directly over SSH.
+    group = Path('/proc/self/cgroup').read_text()
+    if f'/ssh-workspace-{args.backend}.service' not in group or '/user.slice/' not in group:
+        raise ValueError('server must be started by its ssh-workspace user service')
+    if ready(args.backend):
+        raise ValueError(f'{args.backend} session {SESSION} already has a server; refusing a duplicate')
+    if args.backend == 'tmux':
+        command = [executable('tmux'), '-D', '-L', SESSION]
+    else:
+        command = backend_command(args.backend) + ['server']
+    os.chdir(Path.home())
+    os.execv(command[0], command)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest='command', required=True)
+    gen = commands.add_parser('generate', help='print an ssh-<name> shell launcher')
+    machine_args(gen)
+    gen.add_argument('--launcher', default=str(Path.home() / '.local/bin/ssh-workspace'))
+    gen.set_defaults(func=generate)
+    con = commands.add_parser('connect', help='connect or manage a machine default')
+    machine_args(con)
+    con.add_argument('action', nargs='*', help='[tmux|herdr] or default [tmux|herdr|nothing]')
+    con.set_defaults(func=connect)
+    for name, func in [('attach', attach), ('server', server)]:
+        sub = commands.add_parser(name, help='remote ' + name + ' entrypoint')
+        sub.add_argument('backend', choices=BACKENDS)
+        if name == 'attach':
+            sub.add_argument('--tmux-wrapper')
+            sub.add_argument('--check', action='store_true', help='start and verify without attaching a terminal')
+        sub.set_defaults(func=func)
+    args = parser.parse_args()
+    try:
+        return args.func(args) or 0
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        print(f'ssh-workspace: {error}', file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,13 @@
+# Managed by ssh-workspace
+[Unit]
+Description=SSH workspace herdr named server
+
+[Service]
+Type=exec
+WorkingDirectory=%h
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=%h/.local/bin/ssh-workspace server herdr
+KillMode=control-group
+TimeoutStopSec=15
+MemoryAccounting=yes
+CPUAccounting=yes
