@@ -36,28 +36,33 @@ def atomic_write(path, text):
 
 def machine_args(parser):
     parser.add_argument('--name', required=True, help='label used for ssh-<name> and defaults')
-    parser.add_argument('--host', required=True, help='SSH hostname or IP address')
-    parser.add_argument('--user', required=True)
+    parser.add_argument('--host', help='SSH hostname, IP address or config alias (default: name)')
+    parser.add_argument('--user', help='SSH username; omit to use OpenSSH configuration')
     parser.add_argument('--key', help='local private key path; omit to use OpenSSH configuration or agent')
-    parser.add_argument('--port', type=int, default=22)
+    parser.add_argument('--port', type=int, help='SSH port; omit to use OpenSSH configuration')
     parser.add_argument('--tmux-wrapper', help='existing remote wrapper path relative to home')
 
 
 def validate_machine(args):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', args.name):
         raise ValueError('name must start with a letter or digit and contain only letters, digits, _, . or -')
+    args.host = args.host if args.host is not None else args.name
     if not args.host or args.host.startswith('-') or any(c.isspace() for c in args.host):
         raise ValueError('host must be an SSH hostname or IP address')
-    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', args.user):
+    if args.user is not None and not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', args.user):
         raise ValueError('invalid SSH username')
-    if not 1 <= args.port <= 65535:
+    if args.port is not None and not 1 <= args.port <= 65535:
         raise ValueError('port must be between 1 and 65535')
 
 
 def generate(args):
     validate_machine(args)
     command = [str(Path(args.launcher).expanduser().absolute()), 'connect', '--name', args.name,
-               '--host', args.host, '--user', args.user, '--port', str(args.port)]
+               '--host', args.host]
+    if args.user is not None:
+        command += ['--user', args.user]
+    if args.port is not None:
+        command += ['--port', str(args.port)]
     if args.key:
         command += ['--key', str(Path(args.key).expanduser().absolute())]
     if args.tmux_wrapper:
@@ -95,7 +100,10 @@ def connect(args):
     command = ['ssh', '-tt', '-o', 'ConnectTimeout=10']
     if args.key:
         command += ['-i', os.path.expanduser(args.key)]
-    command += ['-p', str(args.port), '--', args.user + '@' + args.host, remote]
+    if args.port is not None:
+        command += ['-p', str(args.port)]
+    destination = args.user + '@' + args.host if args.user else args.host
+    command += ['--', destination, remote]
     return subprocess.call(command)
 
 

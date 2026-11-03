@@ -33,6 +33,42 @@ The installer configures the user systemd manager; it does not replace the host
 init system or configure SSH keys/sshd. Other package managers require manually
 installing the dependencies first. The Linux client requires Python 3.8 or newer and OpenSSH. See below for the Windows client.
 
+## Use an SSH host alias
+
+OpenSSH can associate a convenient name with an IP address, user, port, and
+identity. For example, add this to `~/.ssh/config` in WSL or Linux (use your
+actual address and account):
+
+```sshconfig
+Host hoster
+    HostName 192.0.2.10
+    User alice
+    IdentityFile ~/.ssh/hoster
+    IdentitiesOnly yes
+```
+
+Windows OpenSSH reads `%USERPROFILE%\.ssh\config`. Configure the same alias
+there, with a Windows-accessible identity or agent, if you also want to connect
+from PowerShell. Each client reads its own configuration; adding an alias does
+not move keys or make a WSL key available to Windows. The `IdentityFile` can be
+omitted when the configured agent should choose the identity.
+
+Generate a command using the alias as the workspace name:
+
+```bash
+ssh-workspace generate --name hoster > ~/.local/bin/ssh-hoster
+chmod +x ~/.local/bin/ssh-hoster
+ssh-hoster
+```
+
+On Windows, use `ssh-workspace generate --name hoster --output
+"$env:LOCALAPPDATA\ssh-workspace\bin\ssh-hoster.ps1"` instead. OpenSSH resolves
+the alias at connection time, so changes to its address or identity do not
+require regenerating the command. `ssh -G hoster` displays the effective
+configuration without connecting. If there is no matching alias, OpenSSH tries
+to resolve the name as a network hostname and uses its normal identity and user
+selection; ssh-workspace does not guess keys from filenames.
+
 ## Generate a connection script
 
 Run on your client:
@@ -44,8 +80,9 @@ chmod +x ~/.local/bin/ssh-example
 ```
 
 The generator prints the script to stdout, so you can copy and paste it instead.
-`--name` supplies the command label; `--host` supplies the SSH address. Optional
-`--port 2222` selects a nonstandard SSH port. Scripts use the installed shared
+`--name` supplies the command label and, unless `--host` is provided, the SSH
+host or config alias. `--host`, `--user`, `--key`, and `--port` explicitly
+select those settings; omitted options are left to OpenSSH. Scripts use the installed shared
 launcher at `~/.local/bin/ssh-workspace`; `--launcher /path/to/ssh-workspace`
 overrides that local path. Regenerate scripts when moving them to another user
 or changing connection details. Reuse one name for one machine.

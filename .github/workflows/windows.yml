@@ -15,7 +15,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $exe = Join-Path $env:LOCALAPPDATA 'ssh-workspace\bin\ssh-workspace.exe'
           $wrapper = Join-Path $env:RUNNER_TEMP 'ssh-example.ps1'
-          & $exe generate --name example --host example.org --user tester --output $wrapper
+          & $exe generate --name example --output $wrapper
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $result = & $wrapper default herdr
           if ($LASTEXITCODE -ne 0 -or $result -ne 'herdr') { throw 'Generated wrapper failed' }

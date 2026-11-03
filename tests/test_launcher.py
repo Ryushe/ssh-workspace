@@ -69,6 +69,42 @@ class LauncherTests(unittest.TestCase):
         argv = json.loads(Path(self.env['SSH_RECORD']).read_text())
         self.assertNotIn('-i', argv)
 
+    def test_host_alias_defaults_to_name_and_uses_ssh_config(self):
+        import shutil
+        real_ssh = shutil.which('ssh')
+        if not real_ssh:
+            self.skipTest('OpenSSH unavailable')
+        config = self.root / 'ssh_config'
+        key = self.root / 'hoster_key'
+        config.write_text('Host hoster\n  HostName 192.0.2.10\n'
+                          f'  User alice\n  Port 2222\n  IdentityFile {key}\n')
+        generated = self.cli('generate', '--name', 'hoster', '--launcher', str(CLI))
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        wrapper = self.root / 'ssh-hoster'
+        wrapper.write_text(generated.stdout)
+        result = subprocess.run(['bash', str(wrapper), 'herdr'], env=self.env,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(Path(self.env['SSH_RECORD']).read_text())
+        self.assertNotIn('-i', argv)
+        self.assertNotIn('-p', argv)
+        self.assertIn('hoster', argv)
+        resolved = subprocess.run([real_ssh, '-G', '-F', str(config), *argv[:-1]],
+                                  capture_output=True, text=True)
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        self.assertIn('hostname 192.0.2.10\n', resolved.stdout)
+        self.assertIn('user alice\n', resolved.stdout)
+        self.assertIn('port 2222\n', resolved.stdout)
+        self.assertIn(f'identityfile {key}\n', resolved.stdout)
+
+    def test_explicit_host_user_and_port_are_preserved(self):
+        result = self.cli('connect', '--name', 'hoster', '--host', '192.0.2.10',
+                          '--user', 'alice', '--port', '2222')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(Path(self.env['SSH_RECORD']).read_text())
+        self.assertIn('alice@192.0.2.10', argv)
+        self.assertEqual(argv[argv.index('-p') + 1], '2222')
+
     def test_powershell_wrapper_forwards_arguments_and_quotes_values(self):
         import shutil
         if not shutil.which('pwsh'):
