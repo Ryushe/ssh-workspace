@@ -62,6 +62,29 @@ class LauncherTests(unittest.TestCase):
         self.assertIn(key, json.loads(Path(self.env['SSH_RECORD']).read_text()))
         self.assertFalse((self.root / 'SHOULD_NOT_EXIST').exists())
 
+    def test_agent_identity_without_key(self):
+        result = self.cli('connect', '--name', 'agent', '--host', 'example.org',
+                          '--user', 'tester', 'herdr')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(Path(self.env['SSH_RECORD']).read_text())
+        self.assertNotIn('-i', argv)
+
+    def test_powershell_wrapper_forwards_arguments_and_quotes_values(self):
+        import shutil
+        if not shutil.which('pwsh'):
+            self.skipTest('PowerShell unavailable')
+        key = str(self.root / "key ' $(touch SHOULD_NOT_EXIST)")
+        wrapper = self.root / 'ssh-hoster.ps1'
+        generated = self.cli('generate', '--name', 'hoster', '--host', 'example.org',
+                             '--user', 'tester', '--key', key, '--launcher', str(CLI),
+                             '--format', 'powershell', '--output', str(wrapper))
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        result = subprocess.run(['pwsh', '-NoProfile', '-File', str(wrapper), 'herdr'],
+                                env=self.env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(key, json.loads(Path(self.env['SSH_RECORD']).read_text()))
+        self.assertFalse((self.root / 'SHOULD_NOT_EXIST').exists())
+
     def test_invalid_default_is_rejected_without_changing_saved_value(self):
         self.connect('default', 'herdr')
         self.assertNotEqual(self.connect('default', 'bad').returncode, 0)

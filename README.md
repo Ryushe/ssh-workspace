@@ -1,7 +1,7 @@
 # ssh-workspace
 
-Generate `ssh-<hostname>` commands that open persistent tmux or herdr workspaces
-on Linux machines. Each command remembers its own default. OpenSSH still handles
+Generate `ssh-<hostname>` commands from Linux, WSL, or Windows PowerShell
+that open persistent tmux or herdr workspaces on Linux machines. Each command remembers its own default. OpenSSH still handles
 authentication, host verification and transport; private keys stay on the client.
 
 ## Install
@@ -31,7 +31,7 @@ are reused without upgrading them.
 The host must already be booted with systemd and have SSH access configured.
 The installer configures the user systemd manager; it does not replace the host
 init system or configure SSH keys/sshd. Other package managers require manually
-installing the dependencies first. The client requires Python 3.8 or newer and OpenSSH.
+installing the dependencies first. The Linux client requires Python 3.8 or newer and OpenSSH. See below for the Windows client.
 
 ## Generate a connection script
 
@@ -128,3 +128,47 @@ systemd-analyze --user verify systemd/*.service
 The tests use isolated defaults and fake SSH/service commands. Live checks are
 needed for TUI attachment and distro package installation. Service verification
 requires the launcher installed at its expected path.
+
+## Windows and PowerShell client
+
+The remote workspace still runs on Linux. On Windows, install Python 3.8 or
+newer and the Windows OpenSSH Client, clone the repository, and run in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The installer builds a standalone `ssh-workspace.exe` using PyInstaller (which
+it installs with pip for the current user if missing), installs it under
+`%LOCALAPPDATA%\ssh-workspace\bin`, and adds that directory to the user PATH.
+Open a new PowerShell window afterward. The resulting executable does not need
+Python at runtime. Installation does not change the system execution policy.
+
+Generate a PowerShell command in that same directory, which is on PATH:
+
+```powershell
+ssh-workspace generate --name example --host 192.0.2.10 --user alice `
+  --output "$env:LOCALAPPDATA\ssh-workspace\bin\ssh-example.ps1"
+ssh-example
+ssh-example default herdr
+```
+
+If PowerShell blocks local scripts, follow your organization's policy for
+allowing locally created scripts, or run the generated script with
+`powershell -ExecutionPolicy Bypass -File <path>`. Use `--key` to select an
+explicit Windows private-key path; omit it to let OpenSSH use its normal
+configuration and agent. `--output` writes the script with a UTF-8 BOM so it
+also works with Windows PowerShell 5.1. The generated command remembers its
+local executable path and should be regenerated if moved to another account.
+
+### Identities across Windows and WSL
+
+Omitting `--key` also works on Linux and WSL. Configure each environment's
+OpenSSH to use an identity accepted by the server, or load that identity into
+its SSH agent. Windows OpenSSH and WSL normally have separate agents and
+configuration; this project does not automatically bridge them or copy private
+keys. To use one identity in both, use a hardware-backed key supported by both
+environments, or separately configure a trusted agent bridge. An SSH agent can
+sign authentication requests for any process that can access it, so restrict
+access to the bridge and avoid exposing it to untrusted users or processes.
+Defaults and generated launchers remain local to each environment.

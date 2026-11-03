@@ -1,0 +1,23 @@
+name: Windows client
+on: [push, pull_request]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and exercise Windows client
+        shell: powershell
+        run: |
+          ./install.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = Join-Path $env:LOCALAPPDATA 'ssh-workspace\bin\ssh-workspace.exe'
+          $wrapper = Join-Path $env:RUNNER_TEMP 'ssh-example.ps1'
+          & $exe generate --name example --host example.org --user tester --output $wrapper
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $result = & $wrapper default herdr
+          if ($LASTEXITCODE -ne 0 -or $result -ne 'herdr') { throw 'Generated wrapper failed' }
+          $result = & $wrapper default
+          if ($LASTEXITCODE -ne 0 -or $result -ne 'herdr') { throw 'Default was not saved' }
