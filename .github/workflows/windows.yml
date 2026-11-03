@@ -21,3 +21,7 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $result -ne 'herdr') { throw 'Generated wrapper failed' }
           $result = & $wrapper default
           if ($LASTEXITCODE -ne 0 -or $result -ne 'herdr') { throw 'Default was not saved' }
+          & $exe wsl use Ubuntu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe generate --name example --output $wrapper
+          if ($LASTEXITCODE -ne 0 -or -not ((Get-Content -Raw $wrapper) -match "'--wsl-distro' 'Ubuntu'")) { throw 'WSL selection was not saved' }

@@ -26,7 +26,7 @@ def atomic_write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(dir=path.parent)
     try:
-        with os.fdopen(fd, 'w') as stream:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
             stream.write(text)
         os.replace(temporary, path)
     finally:
@@ -41,11 +41,16 @@ def machine_args(parser):
     parser.add_argument('--key', help='local private key path; omit to use OpenSSH configuration or agent')
     parser.add_argument('--port', type=int, help='SSH port; omit to use OpenSSH configuration')
     parser.add_argument('--tmux-wrapper', help='existing remote wrapper path relative to home')
+    parser.add_argument('--wsl-distro', help='run SSH inside this WSL distribution')
+
+
+def validate_name(name):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name):
+        raise ValueError('name must start with a letter or digit and contain only letters, digits, _, . or -')
 
 
 def validate_machine(args):
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', args.name):
-        raise ValueError('name must start with a letter or digit and contain only letters, digits, _, . or -')
+    validate_name(args.name)
     args.host = args.host if args.host is not None else args.name
     if not args.host or args.host.startswith('-') or any(c.isspace() for c in args.host):
         raise ValueError('host must be an SSH hostname or IP address')
@@ -64,7 +69,10 @@ def generate(args):
     if args.port is not None:
         command += ['--port', str(args.port)]
     if args.key:
-        command += ['--key', str(Path(args.key).expanduser().absolute())]
+        key = args.key if args.wsl_distro else str(Path(args.key).expanduser().absolute())
+        command += ['--key', key]
+    if args.wsl_distro:
+        command += ['--wsl-distro', args.wsl_distro]
     if args.tmux_wrapper:
         command += ['--tmux-wrapper', args.tmux_wrapper]
     if args.format == 'powershell':
@@ -99,12 +107,78 @@ def connect(args):
         remote += ' --tmux-wrapper ' + shlex.quote(args.tmux_wrapper)
     command = ['ssh', '-tt', '-o', 'ConnectTimeout=10']
     if args.key:
-        command += ['-i', os.path.expanduser(args.key)]
+        command += ['-i', args.key if args.wsl_distro else os.path.expanduser(args.key)]
     if args.port is not None:
         command += ['-p', str(args.port)]
     destination = args.user + '@' + args.host if args.user else args.host
     command += ['--', destination, remote]
+    if args.wsl_distro:
+        command = ['wsl.exe', '--distribution', args.wsl_distro, '--exec'] + command
     return subprocess.call(command)
+
+
+def select_wsl(args):
+    if not args.distro or any(ord(char) < 32 for char in args.distro):
+        raise ValueError('invalid WSL distribution name')
+    atomic_write(config_dir() / 'wsl-distro', args.distro + '\n')
+    print('Using WSL distribution ' + args.distro)
+
+
+def identity_generate(args):
+    validate_name(args.name)
+    if args.wsl_distro:
+        return subprocess.call(['wsl.exe', '--distribution', args.wsl_distro, '--exec', 'sh', '-c',
+                                'exec "$HOME/.local/bin/ssh-workspace" "$@"', 'ssh-workspace',
+                                'identity', 'generate', '--name', args.name])
+    ssh_dir = Path.home() / '.ssh'
+    ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    key = ssh_dir / args.name
+    public_key = Path(str(key) + '.pub')
+    if key.exists() or key.is_symlink() or public_key.exists() or public_key.is_symlink():
+        raise ValueError(f'identity {key} or its public key already exists')
+    return subprocess.call(['ssh-keygen', '-t', 'ed25519', '-f', str(key)])
+
+
+def ssh_config_quote(value):
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError('SSH configuration values must not contain control characters')
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def host_set(args):
+    validate_machine(args)
+    if args.wsl_distro:
+        command = ['wsl.exe', '--distribution', args.wsl_distro, '--exec', 'sh', '-c',
+                   'exec "$HOME/.local/bin/ssh-workspace" "$@"', 'ssh-workspace',
+                   'host', 'set', '--name', args.name, '--host', args.host]
+        for flag, value in [('--user', args.user), ('--port', args.port), ('--key', args.key)]:
+            if value is not None:
+                command += [flag, str(value)]
+        return subprocess.call(command)
+    ssh_dir = Path.home() / '.ssh'
+    ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    config = ssh_dir / 'config'
+    if config.is_symlink():
+        raise ValueError(f'{config} is a symlink; manage this SSH configuration manually')
+    include = 'Include ' + ssh_config_quote(str(ssh_dir / 'ssh-workspace.d' / '*.conf'))
+    original = config.read_text(encoding='utf-8') if config.exists() else ''
+    managed_dir = ssh_dir / 'ssh-workspace.d'
+    managed_dir.mkdir(mode=0o700, exist_ok=True)
+    key = args.key
+    if key is None and (ssh_dir / args.name).is_file():
+        key = str(ssh_dir / args.name)
+    lines = ['Host ' + args.name, '    HostName ' + ssh_config_quote(args.host)]
+    if args.user:
+        lines.append('    User ' + ssh_config_quote(args.user))
+    if args.port is not None:
+        lines.append('    Port ' + str(args.port))
+    if key:
+        lines.append('    IdentityFile ' + ssh_config_quote(key))
+        lines.append('    IdentitiesOnly yes')
+    atomic_write(managed_dir / (args.name + '.conf'), '\n'.join(lines) + '\n')
+    if include not in original.splitlines():
+        atomic_write(config, include + '\n' + original)
+    print('Saved SSH host ' + args.name + (f' using {key}' if key else ' using OpenSSH identity selection'))
 
 
 def read_default(path):
@@ -258,6 +332,22 @@ def main():
     machine_args(con)
     con.add_argument('action', nargs='*', help='[tmux|herdr] or default [tmux|herdr|nothing]')
     con.set_defaults(func=connect)
+    wsl = commands.add_parser('wsl', help='configure the shared WSL client')
+    wsl_commands = wsl.add_subparsers(dest='wsl_command', required=True)
+    wsl_use = wsl_commands.add_parser('use', help='select the WSL distribution for Windows')
+    wsl_use.add_argument('distro')
+    wsl_use.set_defaults(func=select_wsl)
+    identity = commands.add_parser('identity', help='manage SSH identities')
+    identity_commands = identity.add_subparsers(dest='identity_command', required=True)
+    identity_gen = identity_commands.add_parser('generate', help='generate an SSH identity')
+    identity_gen.add_argument('--name', required=True)
+    identity_gen.add_argument('--wsl-distro', help='use this WSL distribution')
+    identity_gen.set_defaults(func=identity_generate)
+    host = commands.add_parser('host', help='manage SSH host aliases')
+    host_commands = host.add_subparsers(dest='host_command', required=True)
+    host_add = host_commands.add_parser('set', help='add or update an SSH host alias')
+    machine_args(host_add)
+    host_add.set_defaults(func=host_set)
     for name, func in [('attach', attach), ('server', server)]:
         sub = commands.add_parser(name, help='remote ' + name + ' entrypoint')
         sub.add_argument('backend', choices=BACKENDS)
@@ -267,6 +357,10 @@ def main():
         sub.set_defaults(func=func)
     args = parser.parse_args()
     try:
+        if os.name == 'nt' and hasattr(args, 'wsl_distro') and args.wsl_distro is None:
+            selection = config_dir() / 'wsl-distro'
+            if selection.exists():
+                args.wsl_distro = selection.read_text(encoding='utf-8').strip() or None
         return args.func(args) or 0
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         print(f'ssh-workspace: {error}', file=sys.stderr)

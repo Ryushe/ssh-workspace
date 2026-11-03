@@ -105,6 +105,80 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('alice@192.0.2.10', argv)
         self.assertEqual(argv[argv.index('-p') + 1], '2222')
 
+    def test_host_set_manages_ssh_alias_and_preserves_existing_config(self):
+        import shutil
+        real_ssh = shutil.which('ssh')
+        if not real_ssh:
+            self.skipTest('OpenSSH unavailable')
+        self.env['HOME'] = str(self.root)
+        ssh_dir = self.root / '.ssh'
+        ssh_dir.mkdir()
+        config = ssh_dir / 'config'
+        config.write_text('Host unrelated\n  HostName example.org\n')
+        result = self.cli('host', 'set', '--name', 'hoster', '--host', '192.0.2.10',
+                          '--user', 'alice', '--key', str(self.root / 'hoster-key'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Host unrelated\n  HostName example.org', config.read_text())
+        resolved = subprocess.run([real_ssh, '-G', '-F', str(config), 'hoster'],
+                                  env=self.env, capture_output=True, text=True)
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        self.assertIn('hostname 192.0.2.10\n', resolved.stdout)
+        self.assertIn('user alice\n', resolved.stdout)
+        self.assertIn(f'identityfile {self.root / "hoster-key"}\n', resolved.stdout)
+
+    def test_host_set_finds_same_named_key(self):
+        self.env['HOME'] = str(self.root)
+        ssh_dir = self.root / '.ssh'
+        ssh_dir.mkdir()
+        (ssh_dir / 'hoster').write_text('fixture')
+        result = self.cli('host', 'set', '--name', 'hoster', '--host', '192.0.2.10')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        managed = (ssh_dir / 'ssh-workspace.d' / 'hoster.conf').read_text()
+        self.assertIn(f'IdentityFile "{ssh_dir / "hoster"}"', managed)
+
+    def test_wsl_connection_uses_selected_distribution_and_ssh(self):
+        wsl = self.fakebin / 'wsl.exe'
+        wsl.write_text('#!/usr/bin/env python3\nimport json,os,sys\n'
+                       'open(os.environ["SSH_RECORD"],"w").write(json.dumps(sys.argv[1:]))\n')
+        wsl.chmod(0o755)
+        result = self.cli('connect', '--name', 'hoster', '--wsl-distro', 'Ubuntu', 'herdr')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(Path(self.env['SSH_RECORD']).read_text())
+        self.assertEqual(argv[:4], ['--distribution', 'Ubuntu', '--exec', 'ssh'])
+        self.assertIn('hoster', argv)
+
+    def test_wsl_selection_is_saved_for_later_connections(self):
+        result = self.cli('wsl', 'use', 'Ubuntu')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / 'config' / 'ssh-workspace' / 'wsl-distro').read_text(),
+                         'Ubuntu\n')
+
+    def test_host_update_reuses_include_and_replaces_managed_entry(self):
+        self.env['HOME'] = str(self.root)
+        for host in ('192.0.2.10', '192.0.2.11'):
+            result = self.cli('host', 'set', '--name', 'hoster', '--host', host)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        config = (self.root / '.ssh/config').read_text()
+        self.assertEqual(config.count('Include '), 1)
+        managed = (self.root / '.ssh/ssh-workspace.d/hoster.conf').read_text()
+        self.assertIn('192.0.2.11', managed)
+        self.assertNotIn('192.0.2.10', managed)
+
+    def test_identity_generate_uses_ssh_keygen_without_overwriting(self):
+        self.env['HOME'] = str(self.root)
+        keygen = self.fakebin / 'ssh-keygen'
+        keygen.write_text('#!/usr/bin/env python3\nimport json,os,sys\n'
+                          'open(os.environ["SSH_RECORD"],"w").write(json.dumps(sys.argv[1:]))\n')
+        keygen.chmod(0o755)
+        result = self.cli('identity', 'generate', '--name', 'hoster')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(Path(self.env['SSH_RECORD']).read_text())
+        self.assertEqual(argv, ['-t', 'ed25519', '-f', str(self.root / '.ssh/hoster')])
+        (self.root / '.ssh/hoster').write_text('existing')
+        result = self.cli('identity', 'generate', '--name', 'hoster')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root / '.ssh/hoster').read_text(), 'existing')
+
     def test_powershell_wrapper_forwards_arguments_and_quotes_values(self):
         import shutil
         if not shutil.which('pwsh'):

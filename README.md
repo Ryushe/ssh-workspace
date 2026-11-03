@@ -33,6 +33,49 @@ The installer configures the user systemd manager; it does not replace the host
 init system or configure SSH keys/sshd. Other package managers require manually
 installing the dependencies first. The Linux client requires Python 3.8 or newer and OpenSSH. See below for the Windows client.
 
+## Share hosts and identities with WSL
+
+Choose one WSL distribution to hold your SSH configuration and private keys.
+Install the Linux client inside that distribution and the Windows client as
+shown below. From PowerShell, select it once (list installed distributions with
+`wsl --list --quiet`):
+
+```powershell
+ssh-workspace wsl use Ubuntu
+```
+
+From either WSL or PowerShell, save a host using its IP address:
+
+```text
+ssh-workspace host set --name hoster --host 192.0.2.10 --user alice
+```
+
+If `~/.ssh/hoster` exists in the selected WSL distribution when you save the
+host, it is selected automatically. Otherwise OpenSSH uses its configured
+identities and agent. To select another key explicitly, add `--key
+/home/your-user/.ssh/key-name` (a path inside WSL). Save the host again if you
+add a same-named key later. Host entries are kept under
+`~/.ssh/ssh-workspace.d/`, with an Include at the beginning of `~/.ssh/config`;
+existing configuration is retained. A managed entry takes precedence for that
+alias. The command refuses to rewrite a symlinked SSH config.
+
+To create a new key in the shared WSL location from either environment, run
+`ssh-workspace identity generate --name hoster`. OpenSSH prompts for a
+passphrase and will not overwrite an existing key. Install the resulting
+**public** key on the remote machine using your normal provisioning process.
+Existing WSL keys do not need to be imported or copied. Importing a key that
+exists only in Windows is not yet automated.
+
+Generate `ssh-hoster` in WSL and `ssh-hoster.ps1` in PowerShell using the
+examples below. PowerShell's workspace command starts the selected WSL
+instance when necessary and uses its OpenSSH client, config, keys, and any agent
+available to that WSL process.
+No background synchronization or private-key copies are needed. Standard
+`ssh hoster` in WSL also uses the entry. Native Windows `ssh hoster` uses
+Windows' own SSH configuration; this setup does not change it. Host aliases
+are for SSH, not system-wide DNS names. `--wsl-distro Ubuntu` can explicitly
+select a distribution for an individual operation.
+
 ## Use an SSH host alias
 
 OpenSSH can associate a convenient name with an IP address, user, port, and
@@ -47,9 +90,9 @@ Host hoster
     IdentitiesOnly yes
 ```
 
-Windows OpenSSH reads `%USERPROFILE%\.ssh\config`. Configure the same alias
-there, with a Windows-accessible identity or agent, if you also want to connect
-from PowerShell. Each client reads its own configuration; adding an alias does
+Native Windows OpenSSH reads `%USERPROFILE%\.ssh\config`. Configure the same
+alias there if you also want to connect with native Windows `ssh`. The shared
+WSL setup above lets PowerShell workspace commands use the WSL alias instead. Each client reads its own configuration; adding an alias does
 not move keys or make a WSL key available to Windows. The `IdentityFile` can be
 omitted when the configured agent should choose the identity.
 
@@ -200,12 +243,7 @@ local executable path and should be regenerated if moved to another account.
 
 ### Identities across Windows and WSL
 
-Omitting `--key` also works on Linux and WSL. Configure each environment's
-OpenSSH to use an identity accepted by the server, or load that identity into
-its SSH agent. Windows OpenSSH and WSL normally have separate agents and
-configuration; this project does not automatically bridge them or copy private
-keys. To use one identity in both, use a hardware-backed key supported by both
-environments, or separately configure a trusted agent bridge. An SSH agent can
-sign authentication requests for any process that can access it, so restrict
-access to the bridge and avoid exposing it to untrusted users or processes.
+With `wsl use`, workspace connections from PowerShell use WSL's OpenSSH and
+keys directly. Windows' native OpenSSH remains separate. Without a selected WSL
+distribution, the Windows client uses native OpenSSH and its configuration.
 Defaults and generated launchers remain local to each environment.
