@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate SSH launchers and attach to systemd-owned Linux workspaces."""
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -22,16 +23,33 @@ def config_dir():
     return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / SESSION
 
 
-def atomic_write(path, text):
+def atomic_write(path, text, *, ssh_config=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(dir=path.parent)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as stream:
             stream.write(text)
+        if ssh_config and os.name == 'nt':
+            restrict_windows_ssh_config(temporary)
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def restrict_windows_ssh_config(path):
+    # OpenSSH for Windows rejects config files accessible to unrelated users.
+    who = subprocess.run(['whoami.exe', '/user', '/fo', 'csv', '/nh'],
+                         text=True, capture_output=True, check=False)
+    if who.returncode:
+        raise ValueError('could not determine Windows user SID for SSH config permissions')
+    rows = list(csv.reader(who.stdout.splitlines()))
+    if not rows or len(rows[0]) < 2 or not re.fullmatch(r'S-1-[0-9-]+', rows[0][1]):
+        raise ValueError('could not parse Windows user SID for SSH config permissions')
+    result = subprocess.run(['icacls.exe', path, '/inheritance:r', '/grant:r',
+                             '*' + rows[0][1] + ':(F)'], text=True, capture_output=True)
+    if result.returncode:
+        raise ValueError('could not restrict SSH config permissions: ' + result.stderr.strip())
 
 
 def machine_args(parser):
@@ -175,9 +193,9 @@ def host_set(args):
     if key:
         lines.append('    IdentityFile ' + ssh_config_quote(key))
         lines.append('    IdentitiesOnly yes')
-    atomic_write(managed_dir / (args.name + '.conf'), '\n'.join(lines) + '\n')
+    atomic_write(managed_dir / (args.name + '.conf'), '\n'.join(lines) + '\n', ssh_config=True)
     if include not in original.splitlines():
-        atomic_write(config, include + '\n' + original)
+        atomic_write(config, include + '\n' + original, ssh_config=True)
     print('Saved SSH host ' + args.name + (f' using {key}' if key else ' using OpenSSH identity selection'))
 
 

@@ -56,8 +56,9 @@ identities and agent. To select another key explicitly, add `--key
 /home/your-user/.ssh/key-name` (a path inside WSL). Save the host again if you
 add a same-named key later. Host entries are kept under
 `~/.ssh/ssh-workspace.d/`, with an Include at the beginning of `~/.ssh/config`;
-existing configuration is retained. A managed entry takes precedence for that
-alias. The command refuses to rewrite a symlinked SSH config.
+existing configuration is retained. On Windows, managed SSH configuration
+files are restricted to the current user to satisfy OpenSSH permission checks.
+A managed entry takes precedence for that alias. The command refuses to rewrite a symlinked SSH config.
 
 To create a new key in the shared WSL location from either environment, run
 `ssh-workspace identity generate --name hoster`. OpenSSH prompts for a

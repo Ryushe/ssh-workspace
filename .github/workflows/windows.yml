@@ -21,6 +21,24 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $result -ne 'herdr') { throw 'Generated wrapper failed' }
           $result = & $wrapper default
           if ($LASTEXITCODE -ne 0 -or $result -ne 'herdr') { throw 'Default was not saved' }
+          # Exercise native Windows SSH config permissions and identity paths.
+          $oldProfile = $env:USERPROFILE
+          $testProfile = Join-Path $env:RUNNER_TEMP ('ssh-profile-' + [guid]::NewGuid())
+          New-Item -ItemType Directory $testProfile | Out-Null
+          try {
+            $env:USERPROFILE = $testProfile
+            $key = Join-Path $testProfile 'key name'
+            & $exe host set --name example --host 192.0.2.10 --user alice --key $key
+            if ($LASTEXITCODE -ne 0) { throw 'Host setup failed' }
+            $resolved = & ssh.exe -T -G -F (Join-Path $testProfile '.ssh\config') example
+            if ($LASTEXITCODE -ne 0 -or $resolved -notcontains 'hostname 192.0.2.10' -or
+                $resolved -notcontains 'user alice' -or $resolved -notcontains "identityfile $key") {
+              throw 'Native SSH could not resolve the managed host and identity'
+            }
+          } finally {
+            $env:USERPROFILE = $oldProfile
+            Remove-Item -LiteralPath $testProfile -Recurse -Force
+          }
           & $exe wsl use Ubuntu
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $exe generate --name example --output $wrapper
