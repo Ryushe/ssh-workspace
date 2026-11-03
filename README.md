@@ -9,7 +9,7 @@ authentication, host verification and transport; private keys stay on the client
 Clone this repository on the client and run:
 
 ```bash
-git clone https://github.com/ghostonbutterbread/ssh-workspace.git
+git clone https://github.com/ryushe/ssh-workspace.git
 cd ssh-workspace
 ./install.sh client
 export PATH="$HOME/.local/bin:$PATH"
