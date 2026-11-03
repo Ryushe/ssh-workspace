@@ -1,7 +1,7 @@
 # ssh-workspace
 
-Generate `ssh-<hostname>` commands that open persistent tmux or herdr workspaces
-on Linux machines. Each command remembers its own default. OpenSSH still handles
+Generate `ssh-<hostname>` commands from Linux, WSL, or Windows PowerShell
+that open persistent tmux or herdr workspaces on Linux machines. Each command remembers its own default. OpenSSH still handles
 authentication, host verification and transport; private keys stay on the client.
 
 ## Install
@@ -9,7 +9,7 @@ authentication, host verification and transport; private keys stay on the client
 Clone this repository on the client and run:
 
 ```bash
-git clone https://github.com/ghostonbutterbread/ssh-workspace.git
+git clone https://github.com/ryushe/ssh-workspace.git
 cd ssh-workspace
 ./install.sh client
 export PATH="$HOME/.local/bin:$PATH"
@@ -31,7 +31,87 @@ are reused without upgrading them.
 The host must already be booted with systemd and have SSH access configured.
 The installer configures the user systemd manager; it does not replace the host
 init system or configure SSH keys/sshd. Other package managers require manually
-installing the dependencies first. The client requires Python 3.8 or newer and OpenSSH.
+installing the dependencies first. The Linux client requires Python 3.8 or newer and OpenSSH. See below for the Windows client.
+
+## Share hosts and identities with WSL
+
+Choose one WSL distribution to hold your SSH configuration and private keys.
+Install the Linux client inside that distribution and the Windows client as
+shown below. From PowerShell, select it once (list installed distributions with
+`wsl --list --quiet`):
+
+```powershell
+ssh-workspace wsl use Ubuntu
+```
+
+From either WSL or PowerShell, save a host using its IP address:
+
+```text
+ssh-workspace host set --name hoster --host 192.0.2.10 --user alice
+```
+
+If `~/.ssh/hoster` exists in the selected WSL distribution when you save the
+host, it is selected automatically. Otherwise OpenSSH uses its configured
+identities and agent. To select another key explicitly, add `--key
+/home/your-user/.ssh/key-name` (a path inside WSL). Save the host again if you
+add a same-named key later. Host entries are kept under
+`~/.ssh/ssh-workspace.d/`, with an Include at the beginning of `~/.ssh/config`;
+existing configuration is retained. On Windows, managed SSH configuration
+files are restricted to the current user to satisfy OpenSSH permission checks.
+A managed entry takes precedence for that alias. The command refuses to rewrite a symlinked SSH config.
+
+To create a new key in the shared WSL location from either environment, run
+`ssh-workspace identity generate --name hoster`. OpenSSH prompts for a
+passphrase and will not overwrite an existing key. Install the resulting
+**public** key on the remote machine using your normal provisioning process.
+Existing WSL keys do not need to be imported or copied. Importing a key that
+exists only in Windows is not yet automated.
+
+Generate `ssh-hoster` in WSL and `ssh-hoster.ps1` in PowerShell using the
+examples below. PowerShell's workspace command starts the selected WSL
+instance when necessary and uses its OpenSSH client, config, keys, and any agent
+available to that WSL process.
+No background synchronization or private-key copies are needed. Standard
+`ssh hoster` in WSL also uses the entry. Native Windows `ssh hoster` uses
+Windows' own SSH configuration; this setup does not change it. Host aliases
+are for SSH, not system-wide DNS names. `--wsl-distro Ubuntu` can explicitly
+select a distribution for an individual operation.
+
+## Use an SSH host alias
+
+OpenSSH can associate a convenient name with an IP address, user, port, and
+identity. For example, add this to `~/.ssh/config` in WSL or Linux (use your
+actual address and account):
+
+```sshconfig
+Host hoster
+    HostName 192.0.2.10
+    User alice
+    IdentityFile ~/.ssh/hoster
+    IdentitiesOnly yes
+```
+
+Native Windows OpenSSH reads `%USERPROFILE%\.ssh\config`. Configure the same
+alias there if you also want to connect with native Windows `ssh`. The shared
+WSL setup above lets PowerShell workspace commands use the WSL alias instead. Each client reads its own configuration; adding an alias does
+not move keys or make a WSL key available to Windows. The `IdentityFile` can be
+omitted when the configured agent should choose the identity.
+
+Generate a command using the alias as the workspace name:
+
+```bash
+ssh-workspace generate --name hoster > ~/.local/bin/ssh-hoster
+chmod +x ~/.local/bin/ssh-hoster
+ssh-hoster
+```
+
+On Windows, use `ssh-workspace generate --name hoster --output
+"$env:LOCALAPPDATA\ssh-workspace\bin\ssh-hoster.ps1"` instead. OpenSSH resolves
+the alias at connection time, so changes to its address or identity do not
+require regenerating the command. `ssh -G hoster` displays the effective
+configuration without connecting. If there is no matching alias, OpenSSH tries
+to resolve the name as a network hostname and uses its normal identity and user
+selection; ssh-workspace does not guess keys from filenames.
 
 ## Generate a connection script
 
@@ -44,8 +124,9 @@ chmod +x ~/.local/bin/ssh-example
 ```
 
 The generator prints the script to stdout, so you can copy and paste it instead.
-`--name` supplies the command label; `--host` supplies the SSH address. Optional
-`--port 2222` selects a nonstandard SSH port. Scripts use the installed shared
+`--name` supplies the command label and, unless `--host` is provided, the SSH
+host or config alias. `--host`, `--user`, `--key`, and `--port` explicitly
+select those settings; omitted options are left to OpenSSH. Scripts use the installed shared
 launcher at `~/.local/bin/ssh-workspace`; `--launcher /path/to/ssh-workspace`
 overrides that local path. Regenerate scripts when moving them to another user
 or changing connection details. Reuse one name for one machine.
@@ -128,3 +209,42 @@ systemd-analyze --user verify systemd/*.service
 The tests use isolated defaults and fake SSH/service commands. Live checks are
 needed for TUI attachment and distro package installation. Service verification
 requires the launcher installed at its expected path.
+
+## Windows and PowerShell client
+
+The remote workspace still runs on Linux. On Windows, install Python 3.8 or
+newer and the Windows OpenSSH Client, clone the repository, and run in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The installer builds a standalone `ssh-workspace.exe` using PyInstaller (which
+it installs with pip for the current user if missing), installs it under
+`%LOCALAPPDATA%\ssh-workspace\bin`, and adds that directory to the user PATH.
+Open a new PowerShell window afterward. The resulting executable does not need
+Python at runtime. Installation does not change the system execution policy.
+
+Generate a PowerShell command in that same directory, which is on PATH:
+
+```powershell
+ssh-workspace generate --name example --host 192.0.2.10 --user alice `
+  --output "$env:LOCALAPPDATA\ssh-workspace\bin\ssh-example.ps1"
+ssh-example
+ssh-example default herdr
+```
+
+If PowerShell blocks local scripts, follow your organization's policy for
+allowing locally created scripts, or run the generated script with
+`powershell -ExecutionPolicy Bypass -File <path>`. Use `--key` to select an
+explicit Windows private-key path; omit it to let OpenSSH use its normal
+configuration and agent. `--output` writes the script with a UTF-8 BOM so it
+also works with Windows PowerShell 5.1. The generated command remembers its
+local executable path and should be regenerated if moved to another account.
+
+### Identities across Windows and WSL
+
+With `wsl use`, workspace connections from PowerShell use WSL's OpenSSH and
+keys directly. Windows' native OpenSSH remains separate. Without a selected WSL
+distribution, the Windows client uses native OpenSSH and its configuration.
+Defaults and generated launchers remain local to each environment.
